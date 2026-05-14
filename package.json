@@ -1,0 +1,14 @@
+{
+  "name": "pi-split-editor",
+  "version": "0.1.0",
+  "description": "Open pi prompt editing in a live tmux split editor without freezing the pi UI.",
+  "type": "module",
+  "keywords": ["pi-package", "pi", "tmux", "nvim", "editor"],
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}
