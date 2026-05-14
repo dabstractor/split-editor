@@ -1,6 +1,6 @@
 {
   "name": "split-editor",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Open pi prompt editing in a live tmux split editor without freezing the pi UI.",
   "type": "module",
   "license": "MIT",
