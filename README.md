@@ -4,16 +4,16 @@
   <img src="https://raw.githubusercontent.com/kyleqbnguyen/split-editor/main/assets/screenshot.png" alt="split-editor screenshot" width="1100">
 </p>
 
-Open pi prompt editing in a live tmux split without freezing pi's TUI.
+Edit pi prompts in a live tmux split without blocking pi's TUI.
 
 `split-editor` replaces pi's blocking Ctrl+G external-editor workflow. Press
 Ctrl+G in pi's prompt editor to open the current prompt in your editor (`nvim`
-by default) in a tmux split. When the editor exits, the edited file is read back
+by default) in a tmux split. When the editor exits, the edited text is read back
 into pi's prompt.
 
-Pi stays visible and resize-aware in the original tmux pane while the split
-editor is open. The pi prompt is locked during editing so the prompt cannot be
-mutated in two places at once.
+Pi stays visible and resize-aware in the original pane while the split is open.
+The prompt is locked during editing so it cannot be mutated in two places at
+once.
 
 ## Demo
 
@@ -23,12 +23,8 @@ https://github.com/user-attachments/assets/47a81b03-8292-45b9-8c85-508719c5f585
 
 - pi
 - tmux
-- `nvim` by default, or another terminal editor configured via
-  settings/config/env
-- Run pi inside tmux for live split behavior
-
-Outside tmux, Ctrl+G shows a warning and does not fall back to pi's blocking
-external editor.
+- `nvim` by default; set the `editor` option to use a different terminal editor
+  (see [Configuration](#configuration))
 
 ## Installation
 
@@ -124,9 +120,9 @@ pi
 
 ## Notes and limitations
 
-- Requires tmux for live split behavior.
+- Requires tmux for live split behavior; falls back to pi's default external
+  editor outside tmux.
 - The pi prompt editor ignores input while the split editor is open.
-- Keyboard input goes to whichever tmux pane is focused.
 - If the editor exits non-zero, the temp file is still read back into pi and a
   warning is shown.
 - Temporary files are removed on a best-effort basis after the editor closes.

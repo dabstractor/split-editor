@@ -64,6 +64,13 @@ class SplitEditor extends CustomEditor {
 				this.ui.notify("split editor is already open", "warning");
 				return;
 			}
+
+			if (!process.env.TMUX) {
+				this.ui.notify("tmux not detected; using pi's external editor; start tmux for split editing or disable split-editor to stop this warning.", "warning");
+				super.handleInput(data);
+				return;
+			}
+
 			void this.openSplitEditor();
 			return;
 		}
