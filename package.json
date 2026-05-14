@@ -5,7 +5,9 @@
   "type": "module",
   "keywords": ["pi-package", "pi", "tmux", "nvim", "editor"],
   "pi": {
-    "extensions": ["./index.ts"]
+    "extensions": ["./index.ts"],
+    "image": "https://github.com/user-attachments/assets/6ff75786-04d6-4dee-8a7f-88a7cd7acad1",
+    "video": "https://github.com/user-attachments/assets/47a81b03-8292-45b9-8c85-508719c5f585"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
