@@ -30,7 +30,7 @@ pi install /path/to/picosystem/split-editor
 Development run:
 
 ```bash
-pi -e ./src/index.ts
+pi -e .
 ```
 
 If published later:

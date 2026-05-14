@@ -5,7 +5,7 @@
   "type": "module",
   "keywords": ["pi-package", "pi", "tmux", "nvim", "editor"],
   "pi": {
-    "extensions": ["./src/index.ts"]
+    "extensions": ["./index.ts"]
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
