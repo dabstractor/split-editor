@@ -10,7 +10,7 @@ import {
 	type ExtensionUIContext,
 	type KeybindingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, visibleWidth, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
+import { type EditorComponent, truncateToWidth, visibleWidth, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
 
 const DEFAULT_CONFIG: SplitEditorConfig = {
 	editor: "nvim",
@@ -29,6 +29,12 @@ type SessionState = {
 	active: boolean;
 };
 
+/**
+ * Factory shape for pi editor components, matching pi's `EditorFactory`. Not
+ * re-exported by the pi package, so defined locally for type safety.
+ */
+type EditorComponentFactory = (tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => EditorComponent;
+
 type SplitEditorConfig = {
 	editor: string;
 	size: string;
@@ -40,26 +46,37 @@ type RawConfig = Partial<SplitEditorConfig> & {
 	splitEditor?: Partial<SplitEditorConfig>;
 };
 
-class SplitEditor extends CustomEditor {
+/**
+ * Wraps another editor component (e.g. pi-vim's modal editor) so split-editor
+ * can intercept Ctrl+G, lock the prompt while editing, and render its
+ * "SPLIT EDITOR OPEN" indicator WITHOUT replacing the inner editor.
+ *
+ * pi exposes only a single custom editor component slot. An extension that
+ * calls `ctx.ui.setEditorComponent(...)` therefore clobbers whatever another
+ * extension (such as pi-vim) already registered, dropping its behavior —
+ * including pi-vim's mode-aware cursor shape (skinny in INSERT, fat in NORMAL),
+ * leaving pi's default block cursor. To stay transparent we instead wrap the
+ * previously-registered editor (see createSplitEditor) and forward every
+ * property to it, overriding only handleInput/render/invalidate.
+ */
+class SplitEditorWrapper {
 	private editing = false;
 	private opening = false;
 	private showIndicator = DEFAULT_CONFIG.showIndicator;
 
 	constructor(
-		tui: TUI,
-		theme: EditorTheme,
-		private readonly appKeybindings: KeybindingsManager,
+		private readonly inner: EditorComponent,
+		private readonly tui: TUI,
+		private readonly keybindings: KeybindingsManager,
 		private readonly ui: ExtensionUIContext,
 		private readonly cwd: string,
 		private readonly sessionState: SessionState,
-	) {
-		super(tui, theme, appKeybindings);
-	}
+	) {}
 
 	handleInput(data: string): void {
-		// Intercept before CustomEditor's copied app handlers so pi's built-in
-		// blocking external-editor action never runs.
-		if (this.appKeybindings.matches(data, "app.editor.external")) {
+		// Intercept Ctrl+G before the inner editor so pi's built-in blocking
+		// external-editor action never runs.
+		if (this.keybindings.matches(data, "app.editor.external")) {
 			if (this.editing || this.opening) {
 				this.ui.notify("split editor is already open", "warning");
 				return;
@@ -67,7 +84,10 @@ class SplitEditor extends CustomEditor {
 
 			if (!process.env.TMUX) {
 				this.ui.notify("tmux not detected; using pi's external editor; start tmux for split editing or disable split-editor to stop this warning.", "warning");
-				super.handleInput(data);
+				// Hand Ctrl+G back to the inner editor so pi's built-in external
+				// editor (registered on CustomEditor as an app action) runs as the
+				// fallback.
+				this.inner.handleInput?.(data);
 				return;
 			}
 
@@ -80,11 +100,11 @@ class SplitEditor extends CustomEditor {
 			return;
 		}
 
-		super.handleInput(data);
+		this.inner.handleInput?.(data);
 	}
 
 	render(width: number): string[] {
-		const lines = super.render(width);
+		const lines = this.inner.render(width);
 		if (!this.editing || !this.showIndicator || lines.length === 0) return lines;
 
 		const label = " SPLIT EDITOR OPEN ";
@@ -93,6 +113,14 @@ class SplitEditor extends CustomEditor {
 			lines[last] = truncateToWidth(lines[last]!, Math.max(0, width - label.length), "") + label;
 		}
 		return lines;
+	}
+
+	invalidate(): void {
+		this.inner.invalidate?.();
+	}
+
+	private getExpandedText(): string {
+		return this.inner.getExpandedText?.() ?? this.inner.getText();
 	}
 
 	private async openSplitEditor(): Promise<void> {
@@ -141,7 +169,7 @@ class SplitEditor extends CustomEditor {
 
 			const newText = (await readFile(tempFile, "utf8")).replace(/\n$/, "");
 			if (this.sessionState.active) {
-				this.setText(newText);
+				this.inner.setText(newText);
 				this.tui.requestRender();
 			}
 		} catch (error) {
@@ -153,6 +181,55 @@ class SplitEditor extends CustomEditor {
 			this.tui.requestRender();
 		}
 	}
+}
+
+/**
+ * Build the editor component split-editor registers: a Proxy that behaves like
+ * `inner` (the previously-registered editor, or a fresh CustomEditor when none
+ * exists) except for the three members split-editor overrides. This preserves
+ * sibling extensions' editor behavior — including pi-vim's cursor shape — while
+ * split-editor adds its Ctrl+G split workflow on top.
+ */
+function createSplitEditor(
+	tui: TUI,
+	theme: EditorTheme,
+	keybindings: KeybindingsManager,
+	ui: ExtensionUIContext,
+	cwd: string,
+	sessionState: SessionState,
+	previousFactory: EditorComponentFactory | undefined,
+): EditorComponent {
+	const inner: EditorComponent = previousFactory
+		? previousFactory(tui, theme, keybindings)
+		: new CustomEditor(tui, theme, keybindings);
+	const wrapper = new SplitEditorWrapper(inner, tui, keybindings, ui, cwd, sessionState);
+	const innerRecord = inner as unknown as Record<PropertyKey, unknown>;
+	const wrapperRecord = wrapper as unknown as Record<PropertyKey, unknown>;
+
+	return new Proxy(wrapperRecord, {
+		get(target, prop) {
+			// Never let the wrapper be mistaken for a thenable (e.g. if it is
+			// accidentally awaited somewhere).
+			if (prop === "then") return undefined;
+			// Members split-editor owns.
+			if (prop === "handleInput" || prop === "render" || prop === "invalidate") {
+				const value = target[prop];
+				return typeof value === "function" ? value.bind(wrapper) : value;
+			}
+			// Forward everything else (getText, setText, focused, onSubmit,
+			// onChange, borderColor, actionHandlers, setPaddingX, ...) to the
+			// inner editor so its full behavior is preserved.
+			const value = innerRecord[prop];
+			return typeof value === "function" ? value.bind(inner) : value;
+		},
+		set(_target, prop, value) {
+			innerRecord[prop] = value;
+			return true;
+		},
+		has(_target, prop) {
+			return prop in innerRecord;
+		},
+	}) as unknown as EditorComponent;
 }
 
 async function openTmuxSplitAndWait(options: {
@@ -322,17 +399,23 @@ function formatError(error: unknown): string {
 
 export default function (pi: ExtensionAPI) {
 	const sessionState: SessionState = { active: false };
+	let previousFactory: EditorComponentFactory | undefined;
 
 	pi.on("session_start", (_event, ctx) => {
 		if (!ctx.hasUI) return;
 		sessionState.active = true;
+		// Wrap the existing editor component instead of replacing it, so we
+		// coexist with editor extensions like pi-vim rather than clobbering
+		// them (which would drop pi-vim's mode-aware cursor shape).
+		previousFactory = ctx.ui.getEditorComponent();
 		ctx.ui.setEditorComponent((tui, theme, keybindings) =>
-			new SplitEditor(tui, theme, keybindings, ctx.ui, ctx.cwd, sessionState),
+			createSplitEditor(tui, theme, keybindings, ctx.ui, ctx.cwd, sessionState, previousFactory),
 		);
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
 		sessionState.active = false;
-		ctx.ui.setEditorComponent(undefined);
+		// Unwrap: restore the editor component that was active before us.
+		ctx.ui.setEditorComponent(previousFactory);
 	});
 }
