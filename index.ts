@@ -16,12 +16,16 @@ const DEFAULT_CONFIG: SplitEditorConfig = {
 	editor: "nvim",
 	size: "50%",
 	direction: "h",
+	minWidth: 80,
+	minHeight: 10,
+	aspectRatio: 4,
 	showIndicator: true,
 };
 
 type ProcessResult = {
 	code: number | null;
 	signal: NodeJS.Signals | null;
+	stdout: string;
 	stderr: string;
 };
 
@@ -39,6 +43,9 @@ type SplitEditorConfig = {
 	editor: string;
 	size: string;
 	direction: string;
+	minWidth: number;
+	minHeight: number;
+	aspectRatio: number;
 	showIndicator: boolean;
 };
 
@@ -155,6 +162,9 @@ class SplitEditorWrapper {
 				editorCommand: config.editor,
 				splitSize: config.size,
 				splitDirection: config.direction,
+				splitMinWidth: config.minWidth,
+				splitMinHeight: config.minHeight,
+				splitAspectRatio: config.aspectRatio,
 			});
 
 			const status = await readOptional(statusFile);
@@ -239,16 +249,21 @@ async function openTmuxSplitAndWait(options: {
 	editorCommand: string;
 	splitSize: string;
 	splitDirection: string;
+	splitMinWidth: number;
+	splitMinHeight: number;
+	splitAspectRatio: number;
 }): Promise<void> {
 	const wait = startProcess("tmux", ["wait-for", options.token]);
 	const waitPromise = wait.promise.catch((error: unknown) => ({
 		code: 1,
 		signal: null,
+		stdout: "",
 		stderr: formatError(error),
 	}));
 
 	const paneCommand = buildPaneCommand(options.editorCommand, options.tempFile, options.statusFile, options.token);
-	const splitArgs = ["split-window", splitFlag(options.splitDirection), "-l", options.splitSize, paneCommand];
+	const resolvedDirection = await resolveSplitDirection(options.splitDirection, options.splitMinWidth, options.splitMinHeight, options.splitAspectRatio);
+	const splitArgs = ["split-window", splitFlag(resolvedDirection), "-l", options.splitSize, paneCommand];
 
 	// Capture pi's own pane id right before splitting so we can re-select it
 	// once the editor exits. Without this we rely on tmux's default "select
@@ -315,6 +330,9 @@ async function loadConfig(cwd: string): Promise<SplitEditorConfig> {
 		editor: process.env.SPLIT_EDITOR_EDITOR,
 		size: process.env.SPLIT_EDITOR_SIZE,
 		direction: process.env.SPLIT_EDITOR_DIRECTION,
+		minWidth: process.env.SPLIT_EDITOR_MIN_WIDTH,
+		minHeight: process.env.SPLIT_EDITOR_MIN_HEIGHT,
+		aspectRatio: process.env.SPLIT_EDITOR_ASPECT_RATIO,
 		showIndicator: parseEnvBoolean(process.env.SPLIT_EDITOR_SHOW_INDICATOR),
 	});
 
@@ -345,6 +363,12 @@ function normalizeRawConfig(raw: unknown): Partial<SplitEditorConfig> {
 	if (typeof source.editor === "string" && source.editor.trim()) config.editor = source.editor.trim();
 	if (typeof source.size === "string" && source.size.trim()) config.size = source.size.trim();
 	if (typeof source.direction === "string" && source.direction.trim()) config.direction = source.direction.trim();
+	const minWidth = parseNonNegativeInt(source.minWidth);
+	if (minWidth !== undefined) config.minWidth = minWidth;
+	const minHeight = parseNonNegativeInt(source.minHeight);
+	if (minHeight !== undefined) config.minHeight = minHeight;
+	const aspectRatio = parseNonNegativeInt(source.aspectRatio);
+	if (aspectRatio !== undefined) config.aspectRatio = aspectRatio;
 	if (typeof source.showIndicator === "boolean") config.showIndicator = source.showIndicator;
 
 	return config;
@@ -372,12 +396,81 @@ function splitFlag(direction: string): "-h" | "-v" {
 	return normalized === "v" || normalized === "vertical" ? "-v" : "-h";
 }
 
+/**
+ * Query the current tmux pane's size in columns and rows. Used by `auto`
+ * direction mode to decide between side-by-side and stacked splits.
+ */
+async function getPaneSize(): Promise<{ width: number; height: number }> {
+	const result = await runProcess("tmux", ["display", "-p", "#{pane_width}\t#{pane_height}"]);
+	if (result.code !== 0) {
+		throw new Error(`tmux display failed${formatProcessDetails(result)}`);
+	}
+	const [widthRaw, heightRaw] = result.stdout.trim().split(/\s+/);
+	const width = Number.parseInt(widthRaw ?? "", 10);
+	const height = Number.parseInt(heightRaw ?? "", 10);
+	if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) {
+		throw new Error(`could not parse pane size from tmux output: ${JSON.stringify(result.stdout)}`);
+	}
+	return { width, height };
+}
+
+/**
+ * Resolve the configured split direction into a concrete `h`/`v` value. For
+ * `auto`, measure the pane and decide in three tiers:
+ *
+ *   1. Side-by-side halves the width, so it needs `width >= 2 × minWidth`
+ *      (each pane keeps at least `minWidth` columns). When that holds, always
+ *      prefer side-by-side — including when the height is short, since halving
+ *      a short height would leave too few rows.
+ *   2. Otherwise (width is too narrow to halve) stack when the height can
+ *      spare it: `height >= 2 × minHeight` (each pane keeps at least
+ *      `minHeight` rows).
+ *   3. When neither floor holds (a genuinely small pane), fall back to the
+ *      aspect ratio `width / height > aspectRatio` rather than a hard-coded
+ *      default: side-by-side if the pane is relatively wide, stacked
+ *      otherwise.
+ *
+ * `aspectRatio` is in raw cell units (columns ÷ rows), not visual ratio —
+ * terminal cells are roughly 2:1, so a value of `4` approximates a 2:1 visual
+ * ratio. If the pane can't be measured, fall back to side-by-side so the
+ * editor still opens.
+ */
+async function resolveSplitDirection(direction: string, minWidth: number, minHeight: number, aspectRatio: number): Promise<string> {
+	const normalized = direction.toLowerCase().trim();
+	if (normalized !== "auto" && normalized !== "smart") {
+		return direction;
+	}
+	try {
+		const { width, height } = await getPaneSize();
+		if (width >= 2 * minWidth) return "h";
+		if (height >= 2 * minHeight) return "v";
+		return width > height * aspectRatio ? "h" : "v";
+	} catch {
+		return "h";
+	}
+}
+
+/**
+ * Parse a non-negative integer config value, accepting either a number (from
+ * JSON) or a numeric string (from an env var). Non-finite or negative values
+ * are ignored so the default remains in effect. Shared by `minWidth` and
+ * `minHeight`.
+ */
+function parseNonNegativeInt(value: unknown): number | undefined {
+	if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, value);
+	if (typeof value === "string" && value.trim()) {
+		const parsed = Number.parseInt(value.trim(), 10);
+		if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+	}
+	return undefined;
+}
+
 function shellQuote(value: string): string {
 	return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 function startProcess(command: string, args: string[]): { child: ReturnType<typeof spawn>; promise: Promise<ProcessResult> } {
-	const child = spawn(command, args, { stdio: ["ignore", "ignore", "pipe"] });
+	const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
 	const promise = childResult(child);
 	return { child, promise };
 }
@@ -388,8 +481,13 @@ function runProcess(command: string, args: string[]): Promise<ProcessResult> {
 
 function childResult(child: ReturnType<typeof spawn>): Promise<ProcessResult> {
 	return new Promise((resolve, reject) => {
+		let stdout = "";
 		let stderr = "";
 		let settled = false;
+
+		child.stdout?.on("data", (chunk: Buffer) => {
+			stdout = appendLimited(stdout, chunk.toString("utf8"));
+		});
 
 		child.stderr?.on("data", (chunk: Buffer) => {
 			stderr = appendLimited(stderr, chunk.toString("utf8"));
@@ -404,7 +502,7 @@ function childResult(child: ReturnType<typeof spawn>): Promise<ProcessResult> {
 		child.on("close", (code, signal) => {
 			if (settled) return;
 			settled = true;
-			resolve({ code, signal, stderr });
+			resolve({ code, signal, stdout, stderr });
 		});
 	});
 }

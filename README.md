@@ -65,8 +65,21 @@ Options:
 | --------------- | ----------------------------- | ------- | ----------------------------------------------------------------- |
 | `editor`        | `SPLIT_EDITOR_EDITOR`         | `nvim`  | Editor command to run in the tmux pane.                           |
 | `size`          | `SPLIT_EDITOR_SIZE`           | `50%`   | tmux split size passed to `tmux split-window -l`.                 |
-| `direction`     | `SPLIT_EDITOR_DIRECTION`      | `h`     | `h`/`horizontal` for side-by-side, `v`/`vertical` for top/bottom. |
+| `direction`     | `SPLIT_EDITOR_DIRECTION`      | `h`     | `h`/`horizontal` side-by-side, `v`/`vertical` top/bottom, `auto` picks by pane size. |
+| `minWidth`      | `SPLIT_EDITOR_MIN_WIDTH`      | `80`    | In `auto`, minimum columns each side-by-side pane must keep.         |
+| `minHeight`     | `SPLIT_EDITOR_MIN_HEIGHT`     | `10`    | In `auto`, minimum rows each stacked pane must keep.                 |
+| `aspectRatio`   | `SPLIT_EDITOR_ASPECT_RATIO`   | `4`     | In `auto`, tie-breaker ratio (columns ÷ rows) when both floors fail. |
 | `showIndicator` | `SPLIT_EDITOR_SHOW_INDICATOR` | `true`  | Show `SPLIT EDITOR OPEN` in the editor border while locked.       |
+
+With `direction` set to `auto`, split-editor picks side-by-side or stacked
+from the pane size: it goes side-by-side when the pane is wide enough that
+each half keeps at least `minWidth` columns, stacks when it's narrow but tall
+enough that each half keeps `minHeight` rows, and otherwise falls back to the
+`aspectRatio` (columns ÷ rows). If the pane size can't be read, it defaults to
+side-by-side.
+
+`aspectRatio` is in terminal cells (columns ÷ rows), not visual ratio — cells
+are roughly twice as tall as wide, so `4` reads as about a 2:1 visual ratio.
 
 Precedence, lowest to highest:
 
@@ -83,7 +96,10 @@ Standalone config files use the options directly:
 {
   "editor": "nvim",
   "size": "50%",
-  "direction": "horizontal",
+  "direction": "auto",
+  "minWidth": 80,
+  "minHeight": 10,
+  "aspectRatio": 4,
   "showIndicator": true
 }
 ```
@@ -96,6 +112,9 @@ Pi `settings.json` uses a `splitEditor` object:
     "editor": "nvim",
     "size": "50%",
     "direction": "vertical",
+    "minWidth": 100,
+    "minHeight": 12,
+    "aspectRatio": 4,
     "showIndicator": false
   }
 }
@@ -106,7 +125,10 @@ Environment example:
 ```bash
 SPLIT_EDITOR_EDITOR="nvim" \
 SPLIT_EDITOR_SIZE=50% \
-SPLIT_EDITOR_DIRECTION=h \
+SPLIT_EDITOR_DIRECTION=auto \
+SPLIT_EDITOR_MIN_WIDTH=80 \
+SPLIT_EDITOR_MIN_HEIGHT=10 \
+SPLIT_EDITOR_ASPECT_RATIO=4 \
 SPLIT_EDITOR_SHOW_INDICATOR=false \
 pi
 ```
