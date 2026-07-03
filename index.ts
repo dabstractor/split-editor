@@ -173,6 +173,12 @@ async function openTmuxSplitAndWait(options: {
 	const paneCommand = buildPaneCommand(options.editorCommand, options.tempFile, options.statusFile, options.token);
 	const splitArgs = ["split-window", splitFlag(options.splitDirection), "-l", options.splitSize, paneCommand];
 
+	// Capture pi's own pane id right before splitting so we can re-select it
+	// once the editor exits. Without this we rely on tmux's default "select
+	// previous pane on close" behavior, which isn't guaranteed if the user
+	// switches to a third pane mid-edit or has unusual tmux config.
+	const originPaneId = await captureOriginPaneId();
+
 	try {
 		const splitResult = await runProcess("tmux", splitArgs);
 		if (splitResult.code !== 0) {
@@ -188,6 +194,38 @@ async function openTmuxSplitAndWait(options: {
 	const waitResult = await waitPromise;
 	if (waitResult.code !== 0) {
 		throw new Error(`tmux wait-for failed${formatProcessDetails(waitResult)}`);
+	}
+
+	// Best-effort: re-focus pi's pane. A no-op if it's already focused, and a
+	// hard guarantee otherwise. Must not throw or block the temp-file read-back.
+	await reselectOriginPane(originPaneId);
+}
+
+/**
+ * Query the pane id (e.g. `%5`) pi is currently running in. Returns undefined
+ * if tmux can't report it, so the split still proceeds without focus-return.
+ */
+async function captureOriginPaneId(): Promise<string | undefined> {
+	try {
+		const result = await runProcess("tmux", ["display", "-p", "#{pane_id}"]);
+		if (result.code !== 0) return undefined;
+		const paneId = result.stdout.trim();
+		return paneId || undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Re-select pi's origin pane after the editor exits. Best-effort: any failure
+ * is swallowed so the status read and setText flow still run.
+ */
+async function reselectOriginPane(originPaneId: string | undefined): Promise<void> {
+	if (!originPaneId) return;
+	try {
+		await runProcess("tmux", ["select-pane", "-t", originPaneId]);
+	} catch {
+		// Ignore — focus-return is a best-effort convenience.
 	}
 }
 
