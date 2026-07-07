@@ -9,6 +9,9 @@
     "url": "git+https://github.com/kyleqbnguyen/split-editor.git"
   },
   "homepage": "https://github.com/kyleqbnguyen/split-editor#readme",
+  "scripts": {
+    "test": "node --test"
+  },
   "bugs": {
     "url": "https://github.com/kyleqbnguyen/split-editor/issues"
   },
@@ -21,6 +24,7 @@
   ],
   "files": [
     "index.ts",
+    "tmux.ts",
     "README.md",
     "LICENSE",
     "assets"
