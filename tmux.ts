@@ -105,19 +105,29 @@ export function splitFlag(direction: string): "-h" | "-v" {
  * on the shell getting a chance to run cleanup code. Polls at a coarse interval
  * since this is the recovery path; the common case resolves via the wait-for
  * trap first. Returns immediately if `paneId` is undefined (couldn't capture).
+ *
+ * The existence check MUST be scoped to the pane itself (`-t <paneId>`).
+ * `tmux list-panes` with no target lists only the *current* window's panes, so
+ * if the user switches tmux windows while the editor is open, the unscoped
+ * query would omit this pane and falsely report it closed. That prematurely
+ * resolved `openTmuxSplitAndWait`, reset the editing lock while the pane was
+ * still open, and let a second Ctrl+G open a concurrent split — stranding the
+ * first edit in its temp file. `-t <paneId>` resolves the pane to its own
+ * window regardless of which window is active, and fails (non-zero) once tmux
+ * reaps the pane, so it neither false-positives on window switches nor hangs.
  */
 export async function waitForPaneClosed(paneId: string | undefined): Promise<void> {
 	if (!paneId) return;
 	// eslint-disable-next-line no-constant-condition
 	while (true) {
-		let panes: string[];
+		let exists = false;
 		try {
-			const result = await runProcess("tmux", ["list-panes", "-F", "#{pane_id}"]);
-			panes = result.code === 0 ? result.stdout.split(/\r?\n/) : [];
+			const result = await runProcess("tmux", ["list-panes", "-t", paneId, "-F", "#{pane_id}"]);
+			exists = result.code === 0;
 		} catch {
-			panes = []; // tmux query failed; treat as "not found" so we don't hang.
+			exists = false; // tmux query failed; treat as "gone" so we don't hang.
 		}
-		if (!panes.includes(paneId)) return;
+		if (!exists) return;
 		await new Promise((resolve) => setTimeout(resolve, 150));
 	}
 }
