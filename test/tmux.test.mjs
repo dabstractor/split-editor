@@ -226,4 +226,46 @@ describe("waitForPaneClosed", { skip: !INSIDE_TMUX && "not inside tmux ($TMUX un
 		]);
 		assert.ok(!listPaneIds().includes(pane), "pane still listed after close");
 	});
+
+	it("does NOT resolve when the pane still exists but the active window changes (regression)", async () => {
+		// `tmux list-panes` with no target lists only the *current* window's
+		// panes. The old unscoped query falsely concluded the pane was gone the
+		// moment the user switched tmux windows, which reset the editing lock
+		// mid-edit and let a second split open concurrently. The scoped
+		// `-t <paneId>` query must keep reporting the pane as alive as long as
+		// it truly exists, regardless of which window is active.
+		//
+		// Use dedicated windows (created detached) so the pane and the
+		// "other" window are genuinely separate, and so the test never touches
+		// the window running this test process.
+		const mainWin = tmux(["new-window", "-d", "-P", "-F", "#{window_id}", "sleep 300"]);
+		const otherWin = tmux(["new-window", "-d", "-P", "-F", "#{window_id}", "sleep 300"]);
+		const pane = tmux(["split-window", "-t", mainWin, "-h", "-l", "50%", "-P", "-F", "#{pane_id}", "sleep 300"]);
+		try {
+			// Sanity: querying the pane by id succeeds while it lives.
+			assert.equal(tmux(["list-panes", "-t", pane, "-F", "#{pane_id}"]).includes(pane), true);
+
+			// Make a DIFFERENT window the session's active window and linger well
+			// past the 150ms poll interval. The pane still exists in `mainWin`.
+			tmux(["select-window", "-t", otherWin]);
+			await sleep(500);
+
+			let resolved = false;
+			const guard = waitForPaneClosed(pane).then(() => {
+				resolved = true;
+			});
+			await sleep(500);
+			assert.equal(resolved, false, "waitForPaneClosed false-positived while the pane still existed");
+
+			// Now actually close the pane; it must resolve promptly.
+			killPaneGroup(pane);
+			await Promise.race([
+				guard,
+				hangGuard(3000, "waitForPaneClosed did not resolve after the pane was truly closed"),
+			]);
+		} finally {
+			tmux(["kill-window", "-t", mainWin]);
+			tmux(["kill-window", "-t", otherWin]);
+		}
+	});
 });
