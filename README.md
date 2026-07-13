@@ -61,15 +61,16 @@ changes are picked up without reloading the extension.
 
 Options:
 
-| Option          | Env var                       | Default | Description                                                       |
-| --------------- | ----------------------------- | ------- | ----------------------------------------------------------------- |
-| `editor`        | `SPLIT_EDITOR_EDITOR`         | `nvim`  | Editor command to run in the tmux pane.                           |
-| `size`          | `SPLIT_EDITOR_SIZE`           | `50%`   | tmux split size passed to `tmux split-window -l`.                 |
-| `direction`     | `SPLIT_EDITOR_DIRECTION`      | `h`     | `h`/`horizontal` side-by-side, `v`/`vertical` top/bottom, `auto` picks by pane size. |
-| `minWidth`      | `SPLIT_EDITOR_MIN_WIDTH`      | `80`    | In `auto`, minimum columns each side-by-side pane must keep.         |
-| `minHeight`     | `SPLIT_EDITOR_MIN_HEIGHT`     | `10`    | In `auto`, minimum rows each stacked pane must keep.                 |
-| `aspectRatio`   | `SPLIT_EDITOR_ASPECT_RATIO`   | `4`     | In `auto`, tie-breaker ratio (columns ÷ rows) when both floors fail. |
-| `showIndicator` | `SPLIT_EDITOR_SHOW_INDICATOR` | `true`  | Show `SPLIT EDITOR OPEN` in the editor border while locked.       |
+| Option             | Env var                           | Default | Description                                                                                                                                    |
+| ------------------ | --------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `editor`           | `SPLIT_EDITOR_EDITOR`             | `nvim`  | Editor command to run in the tmux pane.                                                                                                        |
+| `size`             | `SPLIT_EDITOR_SIZE`               | `50%`   | tmux split size passed to `tmux split-window -l`.                                                                                              |
+| `direction`        | `SPLIT_EDITOR_DIRECTION`          | `h`     | `h`/`horizontal` side-by-side, `v`/`vertical` top/bottom, `auto` picks by pane size.                                                           |
+| `minWidth`         | `SPLIT_EDITOR_MIN_WIDTH`          | `80`    | In `auto`, minimum columns each side-by-side pane must keep.                                                                                   |
+| `minHeight`        | `SPLIT_EDITOR_MIN_HEIGHT`         | `10`    | In `auto`, minimum rows each stacked pane must keep.                                                                                           |
+| `aspectRatio`      | `SPLIT_EDITOR_ASPECT_RATIO`       | `4`     | In `auto`, tie-breaker ratio (columns ÷ rows) when both floors fail.                                                                           |
+| `showIndicator`    | `SPLIT_EDITOR_SHOW_INDICATOR`     | `true`  | Show `SPLIT EDITOR OPEN` in the editor border while locked.                                                                                    |
+| `hideWhileEditing` | `SPLIT_EDITOR_HIDE_WHILE_EDITING` | `false` | Collapse pi's prompt editor while the split editor is open: a single indicator line when `showIndicator` is `true`, fully hidden when `false`. |
 
 With `direction` set to `auto`, split-editor picks side-by-side or stacked
 from the pane size: it goes side-by-side when the pane is wide enough that
@@ -100,7 +101,8 @@ Standalone config files use the options directly:
   "minWidth": 80,
   "minHeight": 10,
   "aspectRatio": 4,
-  "showIndicator": true
+  "showIndicator": true,
+  "hideWhileEditing": false
 }
 ```
 
@@ -115,7 +117,8 @@ Pi `settings.json` uses a `splitEditor` object:
     "minWidth": 100,
     "minHeight": 12,
     "aspectRatio": 4,
-    "showIndicator": false
+    "showIndicator": false,
+    "hideWhileEditing": true
   }
 }
 ```
@@ -130,17 +133,21 @@ SPLIT_EDITOR_MIN_WIDTH=80 \
 SPLIT_EDITOR_MIN_HEIGHT=10 \
 SPLIT_EDITOR_ASPECT_RATIO=4 \
 SPLIT_EDITOR_SHOW_INDICATOR=false \
+SPLIT_EDITOR_HIDE_WHILE_EDITING=false \
 pi
 ```
 
-`SPLIT_EDITOR_SHOW_INDICATOR` accepts `1`, `true`, `yes`, `on`, `0`, `false`,
-`no`, or `off`.
+Both `SPLIT_EDITOR_SHOW_INDICATOR` and `SPLIT_EDITOR_HIDE_WHILE_EDITING` accept
+`1`, `true`, `yes`, `on`, `0`, `false`, `no`, or `off`.
 
 ## Notes and limitations
 
 - Requires tmux for live split behavior; falls back to pi's default external
   editor outside tmux.
-- The pi prompt editor ignores input while the split editor is open.
+- The pi prompt editor ignores input while the split editor is open. Set
+  `hideWhileEditing` to `true` to collapse it to a single indicator line (or
+  hide it entirely with `showIndicator: false`) so the freed space shows more
+  conversation history while you edit in the split.
 - If the editor exits non-zero, the temp file is still read back into pi and a
   warning is shown.
 - Temporary files are removed on a best-effort basis after the editor closes.

@@ -25,6 +25,7 @@
   "files": [
     "index.ts",
     "tmux.ts",
+    "collapsed-prompt.ts",
     "README.md",
     "LICENSE",
     "assets"

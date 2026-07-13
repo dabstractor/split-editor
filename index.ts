@@ -12,6 +12,11 @@ import {
 import { type EditorComponent, truncateToWidth, visibleWidth, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
 
 import { formatError, openTmuxSplitAndWait, runProcess } from "./tmux";
+import { renderCollapsedPrompt, SPLIT_EDITOR_OPEN_LABEL } from "./collapsed-prompt";
+
+// Re-exported so the pure helper is part of this module's public surface (and
+// remains unit-testable on its own via ./collapsed-prompt.ts).
+export { renderCollapsedPrompt };
 
 const DEFAULT_CONFIG: SplitEditorConfig = {
 	editor: "nvim",
@@ -21,6 +26,7 @@ const DEFAULT_CONFIG: SplitEditorConfig = {
 	minHeight: 10,
 	aspectRatio: 4,
 	showIndicator: true,
+	hideWhileEditing: false,
 };
 
 type SessionState = {
@@ -41,6 +47,7 @@ type SplitEditorConfig = {
 	minHeight: number;
 	aspectRatio: number;
 	showIndicator: boolean;
+	hideWhileEditing: boolean;
 };
 
 type RawConfig = Partial<SplitEditorConfig> & {
@@ -64,6 +71,7 @@ class SplitEditorWrapper {
 	private editing = false;
 	private opening = false;
 	private showIndicator = DEFAULT_CONFIG.showIndicator;
+	private hideWhileEditing = DEFAULT_CONFIG.hideWhileEditing;
 
 	constructor(
 		private readonly inner: EditorComponent,
@@ -105,10 +113,20 @@ class SplitEditorWrapper {
 	}
 
 	render(width: number): string[] {
+		// While a split editor is open and hiding is enabled, collapse the prompt
+		// to a single indicator line (or hide it entirely when showIndicator is
+		// false) instead of rendering the full inner editor.
+		if (this.editing && this.hideWhileEditing) {
+			return renderCollapsedPrompt(width, {
+				showIndicator: this.showIndicator,
+				borderColor: this.inner.borderColor,
+			});
+		}
+
 		const lines = this.inner.render(width);
 		if (!this.editing || !this.showIndicator || lines.length === 0) return lines;
 
-		const label = " SPLIT EDITOR OPEN ";
+		const label = SPLIT_EDITOR_OPEN_LABEL;
 		const last = lines.length - 1;
 		if (visibleWidth(lines[last]!) >= label.length) {
 			lines[last] = truncateToWidth(lines[last]!, Math.max(0, width - label.length), "") + label;
@@ -144,6 +162,7 @@ class SplitEditorWrapper {
 		try {
 			const config = await loadConfig(this.cwd);
 			this.showIndicator = config.showIndicator;
+			this.hideWhileEditing = config.hideWhileEditing;
 			this.editing = true;
 			this.opening = false;
 			this.tui.requestRender();
@@ -286,6 +305,7 @@ async function loadConfig(cwd: string): Promise<SplitEditorConfig> {
 		minHeight: process.env.SPLIT_EDITOR_MIN_HEIGHT,
 		aspectRatio: process.env.SPLIT_EDITOR_ASPECT_RATIO,
 		showIndicator: parseEnvBoolean(process.env.SPLIT_EDITOR_SHOW_INDICATOR),
+		hideWhileEditing: parseEnvBoolean(process.env.SPLIT_EDITOR_HIDE_WHILE_EDITING),
 	});
 
 	return {
@@ -322,6 +342,7 @@ function normalizeRawConfig(raw: unknown): Partial<SplitEditorConfig> {
 	const aspectRatio = parseNonNegativeInt(source.aspectRatio);
 	if (aspectRatio !== undefined) config.aspectRatio = aspectRatio;
 	if (typeof source.showIndicator === "boolean") config.showIndicator = source.showIndicator;
+	if (typeof source.hideWhileEditing === "boolean") config.hideWhileEditing = source.hideWhileEditing;
 
 	return config;
 }
