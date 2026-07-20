@@ -3,8 +3,10 @@
 Edit pi prompts in a live tmux split without blocking pi's TUI.
 
 `split-editor` replaces pi's blocking Ctrl+G external-editor workflow. Press
-Ctrl+G in pi's prompt editor to open the current prompt in your editor (`nvim`
-by default) in a tmux split. When the editor exits, the edited text is read back
+Ctrl+G in pi's prompt editor to open the current prompt in your editor in a
+tmux split. By default it opens the same editor pi's native Ctrl+G would
+(`externalEditor` setting → `$VISUAL` → `$EDITOR`); set the `editor` option to
+pin a specific one. When the editor exits, the edited text is read back
 into pi's prompt.
 
 Pi stays visible and resize-aware in the original pane while the split is open.
@@ -19,8 +21,9 @@ https://github.com/user-attachments/assets/47a81b03-8292-45b9-8c85-508719c5f585
 
 - pi
 - tmux
-- `nvim` by default; set the `editor` option to use a different terminal editor
-  (see [Configuration](#configuration))
+- A terminal editor; split-editor opens whatever pi's external editor is set
+  to (`externalEditor` → `$VISUAL` → `$EDITOR`, defaulting to `nano`), or pin
+  one with the `editor` option (see [Configuration](#configuration))
 
 ## Installation
 
@@ -63,7 +66,7 @@ Options:
 
 | Option             | Env var                           | Default | Description                                                                                                                                    |
 | ------------------ | --------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `editor`           | `SPLIT_EDITOR_EDITOR`             | `nvim`  | Editor command to run in the tmux pane.                                                                                                        |
+| `editor`           | `SPLIT_EDITOR_EDITOR`             | *(pi's external editor)* | Editor command to run in the tmux pane. Defaults to pi's external editor (`externalEditor` setting → `$VISUAL` → `$EDITOR` → `nano`/`notepad`); set to override. |
 | `size`             | `SPLIT_EDITOR_SIZE`               | `50%`   | tmux split size passed to `tmux split-window -l`.                                                                                              |
 | `direction`        | `SPLIT_EDITOR_DIRECTION`          | `h`     | `h`/`horizontal` side-by-side, `v`/`vertical` top/bottom, `auto` picks by pane size.                                                           |
 | `minWidth`         | `SPLIT_EDITOR_MIN_WIDTH`          | `80`    | In `auto`, minimum columns each side-by-side pane must keep.                                                                                   |

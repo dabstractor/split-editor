@@ -38,6 +38,7 @@ export async function openTmuxSplitAndWait(options: {
 	splitMinWidth: number;
 	splitMinHeight: number;
 	splitAspectRatio: number;
+	envFile?: string;
 }): Promise<void> {
 	const wait = startProcess("tmux", ["wait-for", options.token]);
 	const waitPromise = wait.promise.catch((error: unknown) => ({
@@ -47,7 +48,7 @@ export async function openTmuxSplitAndWait(options: {
 		stderr: formatError(error),
 	}));
 
-	const paneCommand = buildPaneCommand(options.editorCommand, options.tempFile, options.statusFile, options.token);
+	const paneCommand = buildPaneCommand(options.editorCommand, options.tempFile, options.statusFile, options.token, options.envFile);
 	const resolvedDirection = await resolveSplitDirection(options.splitDirection, options.splitMinWidth, options.splitMinHeight, options.splitAspectRatio);
 	// -P prints the new pane id; -F formats it as just the id (e.g. %5).
 	const splitArgs = ["split-window", splitFlag(resolvedDirection), "-l", options.splitSize, "-P", "-F", "#{pane_id}", paneCommand];
@@ -78,19 +79,61 @@ export async function openTmuxSplitAndWait(options: {
 }
 
 /**
+ * Serialize an environment map into POSIX-shell `export` lines so it can be
+ * re-established inside a tmux pane (see `buildPaneCommand`'s `envFile`).
+ *
+ * Why this exists: tmux runs a `split-window` pane under the tmux *server*,
+ * which uses the server's session environment — a snapshot captured when the
+ * server started, refreshed only for the tiny `update-environment` allowlist
+ * (DISPLAY, SSH_AUTH_SOCK, …). Anything set later — a just-sourced direnv, a
+ * freshly-exported API key, vars pi set on its own process — is dropped, unlike
+ * pi's native Ctrl+G which `spawn`s the editor as a direct child and so
+ * inherits the full live `process.env`. Writing this snapshot to a temp file
+ * and sourcing it in the pane restores that inheritance across the boundary.
+ *
+ * `shellQuote`-escaped values handle embedded single quotes and even literal
+ * newlines (valid inside POSIX single quotes). Invalid env keys and empty
+ * values are skipped; keys in `skip` are dropped so the pane/shell keeps owning
+ * the vars it must control itself (TMUX, TMUX_PANE, PWD, …).
+ */
+const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+export function serializeEnvironment(
+	env: Record<string, string | undefined>,
+	skip: ReadonlySet<string> = new Set(),
+): string {
+	const lines: string[] = [];
+	for (const [key, value] of Object.entries(env)) {
+		if (skip.has(key)) continue;
+		if (typeof value !== "string" || value === "") continue;
+		if (!ENV_KEY_PATTERN.test(key)) continue;
+		lines.push(`export ${key}=${shellQuote(value)}`);
+	}
+	return lines.join("\n");
+}
+
+/**
  * Build the shell command tmux runs in the editor pane. The EXIT trap is the
  * fast-path signal (it fires `tmux wait-for -S` on a clean shell exit); the
  * `printf` writes the editor's exit code to `statusFile` for the caller to read
  * back. Neither runs on SIGKILL — that is why `openTmuxSplitAndWait` also races
  * against `waitForPaneClosed`.
+ *
+ * When `envFile` is given it is sourced first (`.`) so the editor inherits the
+ * caller's environment (see `serializeEnvironment`). Sourcing is silenced and
+ * non-fatal: a missing/unreadable file just degrades to the pre-forwarding
+ * behavior rather than blocking the edit. The trap is still set before the
+ * editor so the wait-for/pane-death race covers every exit path.
  */
-export function buildPaneCommand(editorCommand: string, tempFile: string, statusFile: string, token: string): string {
+export function buildPaneCommand(editorCommand: string, tempFile: string, statusFile: string, token: string, envFile?: string): string {
 	const signalCommand = `tmux wait-for -S ${shellQuote(token)}`;
-	return [
-		`trap ${shellQuote(signalCommand)} EXIT`,
-		`${editorCommand} ${shellQuote(tempFile)}`,
-		`printf '%s' "$?" > ${shellQuote(statusFile)}`,
-	].join("; ");
+	const commands: string[] = [`trap ${shellQuote(signalCommand)} EXIT`];
+	if (envFile) {
+		commands.push(`. ${shellQuote(envFile)} 2>/dev/null`);
+	}
+	commands.push(`${editorCommand} ${shellQuote(tempFile)}`);
+	commands.push(`printf '%s' "$?" > ${shellQuote(statusFile)}`);
+	return commands.join("; ");
 }
 
 export function splitFlag(direction: string): "-h" | "-v" {

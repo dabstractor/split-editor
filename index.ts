@@ -11,15 +11,15 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { type EditorComponent, truncateToWidth, visibleWidth, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
 
-import { formatError, openTmuxSplitAndWait, runProcess } from "./tmux";
+import { formatError, openTmuxSplitAndWait, runProcess, serializeEnvironment } from "./tmux";
 import { renderCollapsedPrompt, SPLIT_EDITOR_OPEN_LABEL } from "./collapsed-prompt";
+import { resolveEditor } from "./editor";
 
 // Re-exported so the pure helper is part of this module's public surface (and
 // remains unit-testable on its own via ./collapsed-prompt.ts).
 export { renderCollapsedPrompt };
 
-const DEFAULT_CONFIG: SplitEditorConfig = {
-	editor: "nvim",
+const DEFAULT_CONFIG: Omit<SplitEditorConfig, "editor"> = {
 	size: "50%",
 	direction: "h",
 	minWidth: 80,
@@ -28,6 +28,15 @@ const DEFAULT_CONFIG: SplitEditorConfig = {
 	showIndicator: true,
 	hideWhileEditing: false,
 };
+
+/**
+ * Env vars split-editor must NOT forward into the editor pane: tmux or the
+ * pane's shell owns them for the NEW pane, and pi's value would be wrong (e.g.
+ * forwarding pi's TMUX_PANE would tell the editor it is running in pi's pane).
+ * Everything else in process.env is forwarded so the editor sees the same
+ * environment pi's native external editor (a direct child process) inherits.
+ */
+const SKIP_ENV_KEYS = new Set(["TMUX", "TMUX_PANE", "PWD", "OLDPWD", "SHLVL", "_"]);
 
 type SessionState = {
 	active: boolean;
@@ -157,6 +166,7 @@ class SplitEditorWrapper {
 		const suffix = `${Date.now().toString(36)}-${process.pid.toString(36)}`;
 		const tempFile = join(tmpdir(), `split-editor-${suffix}.md`);
 		const statusFile = join(tmpdir(), `split-editor-${suffix}.status`);
+		const envFile = join(tmpdir(), `split-editor-${suffix}.env`);
 		const token = `split-editor-${suffix}`;
 
 		try {
@@ -167,6 +177,11 @@ class SplitEditorWrapper {
 			this.opening = false;
 			this.tui.requestRender();
 			await writeFile(tempFile, this.getExpandedText(), "utf8");
+			// Forward pi's environment into the editor pane. The pane runs under the
+			// tmux server, which does not inherit this process's env, so without this
+			// the editor would lose anything set after tmux started (direnv, exported
+			// API keys, vars pi set itself, …) — unlike pi's native external editor.
+			await writeFile(envFile, serializeEnvironment(process.env, SKIP_ENV_KEYS), "utf8");
 
 			// Capture pi's own pane id right before the split so we can re-select
 			// it once the editor exits. Done here (in the caller) rather than
@@ -177,6 +192,7 @@ class SplitEditorWrapper {
 				tempFile,
 				statusFile,
 				token,
+				envFile,
 				editorCommand: config.editor,
 				splitSize: config.size,
 				splitDirection: config.direction,
@@ -209,7 +225,7 @@ class SplitEditorWrapper {
 		} finally {
 			this.editing = false;
 			this.opening = false;
-			await Promise.allSettled([unlink(tempFile), unlink(statusFile)]);
+			await Promise.allSettled([unlink(tempFile), unlink(statusFile), unlink(envFile)]);
 			this.tui.requestRender();
 		}
 	}
@@ -295,8 +311,10 @@ async function reselectOriginPane(originPaneId: string | undefined): Promise<voi
 async function loadConfig(cwd: string): Promise<SplitEditorConfig> {
 	const globalConfig = normalizeRawConfig(await readJsonFile(join(getAgentDir(), "extensions", "split-editor.json")));
 	const projectConfig = normalizeRawConfig(await readJsonFile(join(cwd, ".pi", "split-editor.json")));
-	const globalSettings = normalizeRawConfig(await readJsonFile(join(getAgentDir(), "settings.json")));
-	const projectSettings = normalizeRawConfig(await readJsonFile(join(cwd, ".pi", "settings.json")));
+	const globalSettingsRaw = await readJsonFile(join(getAgentDir(), "settings.json"));
+	const projectSettingsRaw = await readJsonFile(join(cwd, ".pi", "settings.json"));
+	const globalSettings = normalizeRawConfig(globalSettingsRaw);
+	const projectSettings = normalizeRawConfig(projectSettingsRaw);
 	const envConfig = normalizeRawConfig({
 		editor: process.env.SPLIT_EDITOR_EDITOR,
 		size: process.env.SPLIT_EDITOR_SIZE,
@@ -308,6 +326,24 @@ async function loadConfig(cwd: string): Promise<SplitEditorConfig> {
 		hideWhileEditing: parseEnvBoolean(process.env.SPLIT_EDITOR_HIDE_WHILE_EDITING),
 	});
 
+	// Highest-precedence split-editor-specific `editor` across the config layers
+	// (env > project settings > project config > global settings > global config).
+	const explicitEditor =
+		envConfig.editor ?? projectSettings.editor ?? projectConfig.editor ?? globalSettings.editor ?? globalConfig.editor;
+
+	// When split-editor's own `editor` is unset everywhere, fall back to exactly
+	// what pi's native Ctrl+G resolves (settings-manager.getExternalEditorCommand):
+	// externalEditor setting → $VISUAL → $EDITOR → platform default. Keeps the
+	// split in lockstep with the user's configured external editor instead of
+	// hard-coding nvim.
+	const editor = resolveEditor({
+		explicitEditor,
+		projectSettings: projectSettingsRaw,
+		globalSettings: globalSettingsRaw,
+		env: process.env,
+		platform: process.platform,
+	});
+
 	return {
 		...DEFAULT_CONFIG,
 		...globalConfig,
@@ -315,6 +351,7 @@ async function loadConfig(cwd: string): Promise<SplitEditorConfig> {
 		...projectConfig,
 		...projectSettings,
 		...envConfig,
+		editor,
 	};
 }
 

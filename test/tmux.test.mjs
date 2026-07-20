@@ -10,6 +10,7 @@ import {
 	openTmuxSplitAndWait,
 	waitForPaneClosed,
 	buildPaneCommand,
+	serializeEnvironment,
 	splitFlag,
 	shellQuote,
 	formatError,
@@ -94,6 +95,26 @@ describe("buildPaneCommand", () => {
 		// each embedded quote is escaped as '\''
 		assert.ok(cmd.includes("'\\''"), cmd);
 	});
+
+	it("omits the source step entirely when no envFile is given (back-compat)", () => {
+		const cmd = buildPaneCommand("nvim", "/tmp/f.md", "/tmp/f.status", "tok");
+		assert.ok(!cmd.includes("2>/dev/null"), cmd);
+		assert.ok(!cmd.includes(". "), cmd);
+	});
+
+	it("sources the env file (best-effort) before the editor when envFile is given", () => {
+		const cmd = buildPaneCommand("nvim", "/tmp/f.md", "/tmp/f.status", "tok", "/tmp/f.env");
+		assert.ok(cmd.includes(`. ${shellQuote("/tmp/f.env")} 2>/dev/null`), cmd);
+		// ordering: trap -> source -> editor -> printf
+		assert.ok(cmd.indexOf("trap") < cmd.indexOf("/tmp/f.env"), cmd);
+		assert.ok(cmd.indexOf("/tmp/f.env") < cmd.indexOf("nvim"), cmd);
+		assert.ok(cmd.indexOf("nvim") < cmd.indexOf("printf"), cmd);
+	});
+
+	it("shell-quotes an envFile path that itself contains a single quote", () => {
+		const cmd = buildPaneCommand("nvim", "/tmp/f.md", "/tmp/f.status", "tok", "/a'b.env");
+		assert.ok(cmd.includes(". '/a'\\''b.env' 2>/dev/null"), cmd);
+	});
 });
 
 describe("splitFlag", () => {
@@ -115,6 +136,60 @@ describe("shellQuote", () => {
 	});
 	it("escapes embedded single quotes", () => {
 		assert.equal(shellQuote("a'b"), "'a'\\''b'");
+	});
+});
+
+describe("serializeEnvironment", () => {
+	it("emits one POSIX `export KEY='value'` line per env var, newline-joined", () => {
+		const out = serializeEnvironment({ FOO: "bar", BAZ: "qux" });
+		assert.equal(out, "export FOO='bar'\nexport BAZ='qux'");
+	});
+
+	it("skips empty/undefined values and invalid key names", () => {
+		const out = serializeEnvironment({
+			GOOD: "x",
+			EMPTY: "",
+			UNSET: undefined,
+			"bad-name": "y",
+			"1digit": "z",
+			ALSO_GOOD: "w",
+		});
+		assert.equal(out, "export GOOD='x'\nexport ALSO_GOOD='w'");
+	});
+
+	it("honors the skip set so tmux/shell-owned vars are not forwarded", () => {
+		const out = serializeEnvironment(
+			{ TMUX: "/tmp/sock,1", FOO: "bar", PWD: "/home" },
+			new Set(["TMUX", "PWD"]),
+		);
+		assert.equal(out, "export FOO='bar'");
+	});
+
+	it("escapes embedded single quotes and preserves literal newlines", () => {
+		const out = serializeEnvironment({ A: "it's", B: "line1\nline2" });
+		// values are safe to `source`: single quotes escaped, newline preserved
+		assert.ok(out.includes("export A='it'\\''s'"), out);
+		assert.ok(out.includes("export B='line1\nline2'"), out);
+	});
+
+	it("round-trips through a real POSIX shell (source really does export every value verbatim)", async () => {
+		// Strongest guarantee: sourcing the serialized file in a real sh exports
+		// each value byte-for-byte, including embedded quotes and newlines.
+		const env = { PLAIN: "hello", SPACES: "a b c", QUOTE: "a'b", NEWLINE: "x\ny" };
+		const serialized = serializeEnvironment(env);
+		const dir = await mkdtemp(join(tmpdir(), "split-env-"));
+		const file = join(dir, "env.sh");
+		await writeFile(file, serialized, "utf8");
+		try {
+			const dump = execFileSync(
+				"sh",
+				["-c", `. ${shellQuote(file)} && printf '%s|%s|%s|%s' "$PLAIN" "$SPACES" "$QUOTE" "$NEWLINE"`],
+				{ encoding: "utf8" },
+			);
+			assert.equal(dump, "hello|a b c|a'b|x\ny");
+		} finally {
+			await rm(dir, { recursive: true, force: true }).catch(() => {});
+		}
 	});
 });
 
@@ -168,6 +243,39 @@ describe("openTmuxSplitAndWait", { skip: !INSIDE_TMUX && "not inside tmux ($TMUX
 		// the blind tmux wait-for child must be reaped (no leak / no hung event loop).
 		await sleep(100);
 		assert.equal(countWaiters(o.token), 0, "wait-for client leaked on happy path");
+	});
+
+	it("forwards the caller's environment into the editor pane (parity with pi's direct spawn)", async () => {
+		// A var that exists ONLY in this test process (not the long-lived tmux
+		// server) must reach the editor pane via the sourced env file; without
+		// forwarding it would be dropped at the tmux server boundary.
+		const sentinelKey = `SPLIT_EDITOR_TEST_SENTINEL_${process.pid}`;
+		const sentinelValue = `forwarded-${Date.now().toString(36)}`;
+		process.env[sentinelKey] = sentinelValue;
+		try {
+			const o = opts(tmp, "envfwd");
+			// "editor": dump the pane's full environment to the temp file so we can
+			// assert the sentinel survived the server boundary. ($1 = tempFile.)
+			o.editorCommand = `sh -c 'env > "$1"' _`;
+			await writeFile(o.tempFile, "seed\n", "utf8");
+			const envFile = join(tmp, `split-editor-${o.token}.env`);
+			await writeFile(envFile, serializeEnvironment(process.env, new Set()), "utf8");
+			o.envFile = envFile;
+
+			await Promise.race([
+				openTmuxSplitAndWait(o),
+				hangGuard(5000, "env-forwarding path did not resolve"),
+			]);
+
+			const captured = await readFile(o.tempFile, "utf8").catch(() => "");
+			assert.ok(
+				captured.includes(`${sentinelKey}=${sentinelValue}`),
+				`env var not forwarded into editor pane; captured env missing ${sentinelKey}=${sentinelValue}`,
+			);
+			await rm(envFile, { force: true }).catch(() => {});
+		} finally {
+			delete process.env[sentinelKey];
+		}
 	});
 
 	it("recovery path: SIGKILL of the pane shell resolves within ~1s instead of hanging", async () => {
