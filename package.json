@@ -4,6 +4,9 @@
   "description": "Open pi prompt editing in a live tmux split editor without freezing the pi UI.",
   "type": "module",
   "license": "MIT",
+  "scripts": {
+    "test": "node --test"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/kyleqbnguyen/split-editor.git"
@@ -21,6 +24,8 @@
   ],
   "files": [
     "index.ts",
+    "tmux.ts",
+    "editor.ts",
     "README.md",
     "LICENSE",
     "assets"

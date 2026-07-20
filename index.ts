@@ -12,12 +12,23 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
 
-const DEFAULT_CONFIG: SplitEditorConfig = {
-	editor: "nvim",
+import { buildPaneCommand, serializeEnvironment, splitFlag } from "./tmux";
+import { resolveEditor } from "./editor";
+
+const DEFAULT_CONFIG: Omit<SplitEditorConfig, "editor"> = {
 	size: "50%",
 	direction: "h",
 	showIndicator: true,
 };
+
+/**
+ * Env vars split-editor must NOT forward into the editor pane: tmux or the
+ * pane's shell owns them for the NEW pane, and pi's value would be wrong (e.g.
+ * forwarding pi's TMUX_PANE would tell the editor it is running in pi's pane).
+ * Everything else in process.env is forwarded so the editor sees the same
+ * environment pi's native external editor (a direct child process) inherits.
+ */
+const SKIP_ENV_KEYS = new Set(["TMUX", "TMUX_PANE", "PWD", "OLDPWD", "SHLVL", "_"]);
 
 type ProcessResult = {
 	code: number | null;
@@ -110,6 +121,7 @@ class SplitEditor extends CustomEditor {
 		const suffix = `${Date.now().toString(36)}-${process.pid.toString(36)}`;
 		const tempFile = join(tmpdir(), `split-editor-${suffix}.md`);
 		const statusFile = join(tmpdir(), `split-editor-${suffix}.status`);
+		const envFile = join(tmpdir(), `split-editor-${suffix}.env`);
 		const token = `split-editor-${suffix}`;
 
 		try {
@@ -119,11 +131,17 @@ class SplitEditor extends CustomEditor {
 			this.opening = false;
 			this.tui.requestRender();
 			await writeFile(tempFile, this.getExpandedText(), "utf8");
+			// Forward pi's environment into the editor pane. The pane runs under the
+			// tmux server, which does not inherit this process's env, so without this
+			// the editor would lose anything set after tmux started (direnv, exported
+			// API keys, vars pi set itself, …) — unlike pi's native external editor.
+			await writeFile(envFile, serializeEnvironment(process.env, SKIP_ENV_KEYS), "utf8");
 
 			await openTmuxSplitAndWait({
 				tempFile,
 				statusFile,
 				token,
+				envFile,
 				editorCommand: config.editor,
 				splitSize: config.size,
 				splitDirection: config.direction,
@@ -149,7 +167,7 @@ class SplitEditor extends CustomEditor {
 		} finally {
 			this.editing = false;
 			this.opening = false;
-			await Promise.allSettled([unlink(tempFile), unlink(statusFile)]);
+			await Promise.allSettled([unlink(tempFile), unlink(statusFile), unlink(envFile)]);
 			this.tui.requestRender();
 		}
 	}
@@ -162,6 +180,7 @@ async function openTmuxSplitAndWait(options: {
 	editorCommand: string;
 	splitSize: string;
 	splitDirection: string;
+	envFile?: string;
 }): Promise<void> {
 	const wait = startProcess("tmux", ["wait-for", options.token]);
 	const waitPromise = wait.promise.catch((error: unknown) => ({
@@ -170,7 +189,7 @@ async function openTmuxSplitAndWait(options: {
 		stderr: formatError(error),
 	}));
 
-	const paneCommand = buildPaneCommand(options.editorCommand, options.tempFile, options.statusFile, options.token);
+	const paneCommand = buildPaneCommand(options.editorCommand, options.tempFile, options.statusFile, options.token, options.envFile);
 	const splitArgs = ["split-window", splitFlag(options.splitDirection), "-l", options.splitSize, paneCommand];
 
 	try {
@@ -194,13 +213,33 @@ async function openTmuxSplitAndWait(options: {
 async function loadConfig(cwd: string): Promise<SplitEditorConfig> {
 	const globalConfig = normalizeRawConfig(await readJsonFile(join(getAgentDir(), "extensions", "split-editor.json")));
 	const projectConfig = normalizeRawConfig(await readJsonFile(join(cwd, ".pi", "split-editor.json")));
-	const globalSettings = normalizeRawConfig(await readJsonFile(join(getAgentDir(), "settings.json")));
-	const projectSettings = normalizeRawConfig(await readJsonFile(join(cwd, ".pi", "settings.json")));
+	const globalSettingsRaw = await readJsonFile(join(getAgentDir(), "settings.json"));
+	const projectSettingsRaw = await readJsonFile(join(cwd, ".pi", "settings.json"));
+	const globalSettings = normalizeRawConfig(globalSettingsRaw);
+	const projectSettings = normalizeRawConfig(projectSettingsRaw);
 	const envConfig = normalizeRawConfig({
 		editor: process.env.SPLIT_EDITOR_EDITOR,
 		size: process.env.SPLIT_EDITOR_SIZE,
 		direction: process.env.SPLIT_EDITOR_DIRECTION,
 		showIndicator: parseEnvBoolean(process.env.SPLIT_EDITOR_SHOW_INDICATOR),
+	});
+
+	// Highest-precedence split-editor-specific `editor` across the config layers
+	// (env > project settings > project config > global settings > global config).
+	const explicitEditor =
+		envConfig.editor ?? projectSettings.editor ?? projectConfig.editor ?? globalSettings.editor ?? globalConfig.editor;
+
+	// When split-editor's own `editor` is unset everywhere, fall back to exactly
+	// what pi's native Ctrl+G resolves (settings-manager.getExternalEditorCommand):
+	// externalEditor setting → $VISUAL → $EDITOR → platform default. Keeps the
+	// split in lockstep with the user's configured external editor instead of
+	// hard-coding nvim.
+	const editor = resolveEditor({
+		explicitEditor,
+		projectSettings: projectSettingsRaw,
+		globalSettings: globalSettingsRaw,
+		env: process.env,
+		platform: process.platform,
 	});
 
 	return {
@@ -210,6 +249,7 @@ async function loadConfig(cwd: string): Promise<SplitEditorConfig> {
 		...projectConfig,
 		...projectSettings,
 		...envConfig,
+		editor,
 	};
 }
 
@@ -243,24 +283,7 @@ function parseEnvBoolean(value: string | undefined): boolean | undefined {
 	return undefined;
 }
 
-function buildPaneCommand(editorCommand: string, tempFile: string, statusFile: string, token: string): string {
-	const signalCommand = `tmux wait-for -S ${shellQuote(token)}`;
-	return [
-		`trap ${shellQuote(signalCommand)} EXIT`,
-		`${editorCommand} ${shellQuote(tempFile)}`,
-		`printf '%s' "$?" > ${shellQuote(statusFile)}`,
-	].join("; ");
-}
-
-function splitFlag(direction: string): "-h" | "-v" {
-	const normalized = direction.toLowerCase();
-	return normalized === "v" || normalized === "vertical" ? "-v" : "-h";
-}
-
-function shellQuote(value: string): string {
-	return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
+// buildPaneCommand, splitFlag, and shellQuote live in ./tmux.ts (pure helpers, extracted to be unit-testable without the pi runtime).
 function startProcess(command: string, args: string[]): { child: ReturnType<typeof spawn>; promise: Promise<ProcessResult> } {
 	const child = spawn(command, args, { stdio: ["ignore", "ignore", "pipe"] });
 	const promise = childResult(child);
